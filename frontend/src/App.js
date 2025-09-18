@@ -229,16 +229,22 @@ const Login = () => {
   const [role, setRole] = useState('student');
   const [loading, setLoading] = useState(false);
   const { login, register } = useAuth();
+  const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
+      let success = false;
       if (isLogin) {
-        await login(email, password);
+        success = await login(email, password);
       } else {
-        await register(email, password, fullName, role);
+        success = await register(email, password, fullName, role);
+      }
+      
+      if (success) {
+        navigate('/dashboard');
       }
     } finally {
       setLoading(false);
