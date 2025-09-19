@@ -11,6 +11,15 @@ import axios from "axios";
 import { Toaster, toast } from "react-hot-toast";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+} from "firebase/auth";
+import { doc, setDoc, getDoc, updateDoc } from "firebase/firestore";
+import { auth, db } from "./firebase";
 import "./App.css";
 
 // Shadcn UI Components
@@ -53,10 +62,53 @@ import {
   ChartBarIcon,
   ClockIcon,
   CheckCircleIcon,
+  SunIcon,
+  MoonIcon,
 } from "@heroicons/react/24/outline";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+
+// Theme Context
+const ThemeContext = createContext();
+
+const useTheme = () => {
+  const context = useContext(ThemeContext);
+  if (!context) {
+    throw new Error("useTheme must be used within ThemeProvider");
+  }
+  return context;
+};
+
+const ThemeProvider = ({ children }) => {
+  const [theme, setTheme] = useState(() => {
+    // Check localStorage for saved theme preference
+    const savedTheme = localStorage.getItem("theme");
+    return savedTheme || "light";
+  });
+
+  useEffect(() => {
+    // Apply theme to document
+    const root = document.documentElement;
+    if (theme === "dark") {
+      root.classList.add("dark");
+    } else {
+      root.classList.remove("dark");
+    }
+    // Save to localStorage
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prevTheme) => (prevTheme === "light" ? "dark" : "light"));
+  };
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+};
 
 // Auth Context
 const AuthContext = createContext();
@@ -74,72 +126,139 @@ const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (token) {
-      axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
-      fetchCurrentUser();
-    } else {
+    // Listen for authentication state changes
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // User is signed in, fetch additional profile data from Firestore
+        try {
+          const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            setUser({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              full_name: userData.full_name || firebaseUser.displayName || "",
+              role: userData.role || "student",
+              avatar_url: userData.avatar_url || firebaseUser.photoURL || "",
+              created_at:
+                userData.created_at || firebaseUser.metadata.creationTime,
+            });
+          } else {
+            // Create basic user profile if it doesn't exist
+            const userData = {
+              full_name: firebaseUser.displayName || "",
+              role: "student",
+              avatar_url: firebaseUser.photoURL || "",
+              created_at: new Date().toISOString(),
+            };
+            await setDoc(doc(db, "users", firebaseUser.uid), userData);
+            setUser({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              ...userData,
+            });
+          }
+        } catch (error) {
+          console.error("Error fetching user data:", error);
+          setUser({
+            uid: firebaseUser.uid,
+            email: firebaseUser.email,
+            full_name: firebaseUser.displayName || "",
+            role: "student",
+            avatar_url: firebaseUser.photoURL || "",
+            created_at: firebaseUser.metadata.creationTime,
+          });
+        }
+      } else {
+        setUser(null);
+      }
       setLoading(false);
-    }
-  }, []);
+    });
 
-  const fetchCurrentUser = async () => {
-    try {
-      const response = await axios.get(`${API}/auth/me`);
-      setUser(response.data);
-    } catch (error) {
-      localStorage.removeItem("token");
-      delete axios.defaults.headers.common["Authorization"];
-    } finally {
-      setLoading(false);
-    }
-  };
+    return () => unsubscribe();
+  }, []);
 
   const login = async (email, password) => {
     try {
-      const response = await axios.post(`${API}/auth/login`, {
-        email,
-        password,
-      });
-      const { access_token, user: userData } = response.data;
-
-      localStorage.setItem("token", access_token);
-      axios.defaults.headers.common["Authorization"] = `Bearer ${access_token}`;
-      setUser(userData);
+      await signInWithEmailAndPassword(auth, email, password);
       toast.success("Welcome back!");
       return true;
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Login failed");
+      let errorMessage = "Login failed";
+      switch (error.code) {
+        case "auth/user-not-found":
+          errorMessage = "No account found with this email";
+          break;
+        case "auth/wrong-password":
+          errorMessage = "Incorrect password";
+          break;
+        case "auth/invalid-email":
+          errorMessage = "Invalid email address";
+          break;
+        case "auth/user-disabled":
+          errorMessage = "This account has been disabled";
+          break;
+        default:
+          errorMessage = error.message;
+      }
+      toast.error(errorMessage);
       return false;
     }
   };
 
   const register = async (email, password, fullName, role) => {
     try {
-      const response = await axios.post(`${API}/auth/register`, {
+      const userCredential = await createUserWithEmailAndPassword(
+        auth,
         email,
-        password,
-        full_name: fullName,
-        role,
-      });
-      const { access_token, user: userData } = response.data;
+        password
+      );
+      const firebaseUser = userCredential.user;
 
-      localStorage.setItem("token", access_token);
-      axios.defaults.headers.common["Authorization"] = `Bearer ${access_token}`;
-      setUser(userData);
+      // Update Firebase Auth profile
+      await updateProfile(firebaseUser, {
+        displayName: fullName,
+      });
+
+      // Save additional profile data to Firestore
+      const userData = {
+        full_name: fullName,
+        role: role || "student",
+        avatar_url: "",
+        created_at: new Date().toISOString(),
+      };
+
+      await setDoc(doc(db, "users", firebaseUser.uid), userData);
+
       toast.success("Welcome to ABC Music Library!");
       return true;
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Registration failed");
+      let errorMessage = "Registration failed";
+      switch (error.code) {
+        case "auth/email-already-in-use":
+          errorMessage = "An account with this email already exists";
+          break;
+        case "auth/weak-password":
+          errorMessage = "Password should be at least 6 characters";
+          break;
+        case "auth/invalid-email":
+          errorMessage = "Invalid email address";
+          break;
+        default:
+          errorMessage = error.message;
+      }
+      toast.error(errorMessage);
       return false;
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem("token");
-    delete axios.defaults.headers.common["Authorization"];
-    setUser(null);
-    toast.success("Logged out successfully");
+  const logout = async () => {
+    try {
+      await signOut(auth);
+      toast.success("Logged out successfully");
+    } catch (error) {
+      toast.error("Error signing out");
+    }
   };
 
   return (
@@ -161,6 +280,7 @@ const AuthProvider = ({ children }) => {
 // Navigation Component
 const Navigation = () => {
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
 
   const menuItems = [
@@ -170,7 +290,7 @@ const Navigation = () => {
   ];
 
   return (
-    <nav className="bg-white shadow-lg border-b">
+    <nav className="bg-white dark:bg-gray-900 shadow-lg border-b border-gray-200 dark:border-gray-700">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between h-16">
           <div className="flex items-center">
@@ -178,7 +298,7 @@ const Navigation = () => {
               <div className="w-8 h-8 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg flex items-center justify-center">
                 <MusicalNoteIcon className="h-5 w-5 text-white" />
               </div>
-              <span className="text-xl font-bold text-gray-900">
+              <span className="text-xl font-bold text-gray-900 dark:text-white">
                 ABC Music Library
               </span>
             </Link>
@@ -188,7 +308,7 @@ const Navigation = () => {
                 <Link
                   key={item.path}
                   to={item.path}
-                  className="flex items-center space-x-2 text-gray-600 hover:text-purple-600 px-3 py-2 rounded-md text-sm font-medium transition-colors"
+                  className="flex items-center space-x-2 text-gray-600 dark:text-gray-300 hover:text-purple-600 dark:hover:text-purple-400 px-3 py-2 rounded-md text-sm font-medium transition-colors"
                 >
                   <item.icon className="h-5 w-5" />
                   <span>{item.label}</span>
@@ -198,6 +318,22 @@ const Navigation = () => {
           </div>
 
           <div className="flex items-center space-x-4">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleTheme}
+              className="flex items-center space-x-2"
+            >
+              {theme === "light" ? (
+                <MoonIcon className="h-5 w-5" />
+              ) : (
+                <SunIcon className="h-5 w-5" />
+              )}
+              <span className="hidden md:block">
+                {theme === "light" ? "Dark" : "Light"}
+              </span>
+            </Button>
+
             <Dialog>
               <DialogTrigger asChild>
                 <Button
@@ -289,21 +425,21 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-50 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-50 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md"
       >
-        <Card className="shadow-xl border-0">
+        <Card className="shadow-xl border-0 bg-white dark:bg-gray-800">
           <CardHeader className="text-center pb-2">
             <div className="w-16 h-16 bg-gradient-to-r from-purple-600 to-pink-600 rounded-full flex items-center justify-center mx-auto mb-4">
               <MusicalNoteIcon className="h-8 w-8 text-white" />
             </div>
-            <CardTitle className="text-2xl font-bold text-gray-900">
+            <CardTitle className="text-2xl font-bold text-gray-900 dark:text-white">
               {isLogin ? "Welcome Back" : "Join ABC Music Library"}
             </CardTitle>
-            <p className="text-gray-600 mt-2">
+            <p className="text-gray-600 dark:text-gray-300 mt-2">
               {isLogin
                 ? "Sign in to your account"
                 : "Create your account to get started"}
@@ -424,10 +560,10 @@ const Dashboard = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
             Welcome back, {user?.full_name}!
           </h1>
-          <p className="text-gray-600 mt-1">
+          <p className="text-gray-600 dark:text-gray-300 mt-1">
             Here's what's happening with your music learning journey.
           </p>
         </div>
@@ -601,10 +737,10 @@ const SheetMusicLibrary = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
             Sheet Music Library
           </h1>
-          <p className="text-gray-600 mt-1">
+          <p className="text-gray-600 dark:text-gray-300 mt-1">
             Discover and explore our collection of sheet music
           </p>
         </div>
@@ -1048,10 +1184,10 @@ const MusicTheoryEducation = () => {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
             Music Theory Education
           </h1>
-          <p className="text-gray-600 mt-1">
+          <p className="text-gray-600 dark:text-gray-300 mt-1">
             Interactive lessons to enhance your musical knowledge
           </p>
         </div>
@@ -1194,12 +1330,35 @@ const Profile = () => {
   });
   const [loading, setLoading] = useState(false);
 
+  // Update form data when user changes
+  useEffect(() => {
+    if (user) {
+      setFormData({
+        full_name: user.full_name || "",
+        avatar_url: user.avatar_url || "",
+      });
+    }
+  }, [user]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      await axios.put(`${API}/users/profile`, formData);
+      // Update Firestore document
+      await updateDoc(doc(db, "users", user.uid), {
+        full_name: formData.full_name,
+        avatar_url: formData.avatar_url,
+      });
+
+      // Update Firebase Auth profile if display name changed
+      if (formData.full_name !== user.full_name) {
+        await updateProfile(auth.currentUser, {
+          displayName: formData.full_name,
+          photoURL: formData.avatar_url,
+        });
+      }
+
       toast.success("Profile updated successfully!");
     } catch (error) {
       toast.error("Failed to update profile");
@@ -1211,8 +1370,10 @@ const Profile = () => {
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-gray-900">Profile Settings</h1>
-        <p className="text-gray-600 mt-1">
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
+          Profile Settings
+        </h1>
+        <p className="text-gray-600 dark:text-gray-300 mt-1">
           Manage your account information and preferences
         </p>
       </div>
@@ -1313,7 +1474,7 @@ const ProtectedRoute = ({ children }) => {
 // Layout Component
 const Layout = ({ children }) => {
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {children}
@@ -1325,57 +1486,59 @@ const Layout = ({ children }) => {
 // Main App Component
 function App() {
   return (
-    <AuthProvider>
-      <Router>
-        <div className="App">
-          <Toaster position="top-right" />
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route
-              path="/dashboard"
-              element={
-                <ProtectedRoute>
-                  <Layout>
-                    <Dashboard />
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/library"
-              element={
-                <ProtectedRoute>
-                  <Layout>
-                    <SheetMusicLibrary />
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/education"
-              element={
-                <ProtectedRoute>
-                  <Layout>
-                    <MusicTheoryEducation />
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/profile"
-              element={
-                <ProtectedRoute>
-                  <Layout>
-                    <Profile />
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-          </Routes>
-        </div>
-      </Router>
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <Router>
+          <div className="App">
+            <Toaster position="top-right" />
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route
+                path="/dashboard"
+                element={
+                  <ProtectedRoute>
+                    <Layout>
+                      <Dashboard />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/library"
+                element={
+                  <ProtectedRoute>
+                    <Layout>
+                      <SheetMusicLibrary />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/education"
+                element={
+                  <ProtectedRoute>
+                    <Layout>
+                      <MusicTheoryEducation />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/profile"
+                element={
+                  <ProtectedRoute>
+                    <Layout>
+                      <Profile />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            </Routes>
+          </div>
+        </Router>
+      </AuthProvider>
+    </ThemeProvider>
   );
 }
 
