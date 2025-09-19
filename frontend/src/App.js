@@ -19,32 +19,40 @@ import {
   updateProfile,
 } from "firebase/auth";
 import { doc, setDoc, getDoc, updateDoc } from "firebase/firestore";
-import { auth, db } from "./firebase";
+import { auth, db } from "./firebase.js";
 import "./App.css";
 
 // Shadcn UI Components
-import { Button } from "./components/ui/button";
-import { Input } from "./components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
+import { Button } from "./components/ui/button.jsx";
+import { Input } from "./components/ui/input.jsx";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "./components/ui/card.jsx";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "./components/ui/dialog";
-import { Badge } from "./components/ui/badge";
-import { Avatar, AvatarFallback, AvatarImage } from "./components/ui/avatar";
+} from "./components/ui/dialog.jsx";
+import { Badge } from "./components/ui/badge.jsx";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "./components/ui/avatar.jsx";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "./components/ui/select";
-import { Textarea } from "./components/ui/textarea";
-import { Progress } from "./components/ui/progress";
+} from "./components/ui/select.jsx";
+import { Textarea } from "./components/ui/textarea.jsx";
+import { Progress } from "./components/ui/progress.jsx";
 
 // Icons
 import {
@@ -67,7 +75,7 @@ import {
 } from "@heroicons/react/24/outline";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const API = `${BACKEND_URL}/functions`;
 
 // Theme Context
 const ThemeContext = createContext();
@@ -928,46 +936,27 @@ const SheetMusicUploadForm = ({ onSuccess }) => {
     setUploading(true);
 
     try {
-      // Upload files first
-      let pdfUrl = null;
-      let audioUrl = null;
+      const formDataObj = new FormData();
+      if (pdfFile) formDataObj.append("filePDF", pdfFile);
+      if (audioFile) formDataObj.append("fileAudio", audioFile);
 
-      if (pdfFile) {
-        const pdfFormData = new FormData();
-        pdfFormData.append("file", pdfFile);
-        pdfFormData.append("file_type", "pdf");
+      formDataObj.append("title", formData.title);
+      formDataObj.append("tags", formData.tags);
+      formDataObj.append("composer", formData.composer);
+      formDataObj.append("genre", formData.genre);
+      formDataObj.append("difficulty_level", formData.difficulty_level);
+      formDataObj.append("description", formData.description);
 
-        const pdfResponse = await axios.post(
-          `${API}/files/upload`,
-          pdfFormData
-        );
-        pdfUrl = pdfResponse.data.url;
-      }
+      console.log(`${API}/add-library-score/upload`);
+      const response = await axios.post(
+        `${API}/add-library-score/upload`,
+        formDataObj,
+        {
+          headers: { "Content-Type": "multipart/form-data" },
+        }
+      );
+      console.log(response.data);
 
-      if (audioFile) {
-        const audioFormData = new FormData();
-        audioFormData.append("file", audioFile);
-        audioFormData.append("file_type", "audio");
-
-        const audioResponse = await axios.post(
-          `${API}/files/upload`,
-          audioFormData
-        );
-        audioUrl = audioResponse.data.url;
-      }
-
-      // Create sheet music entry
-      const sheetMusicData = {
-        ...formData,
-        tags: formData.tags
-          .split(",")
-          .map((tag) => tag.trim())
-          .filter(Boolean),
-        pdf_url: pdfUrl,
-        audio_url: audioUrl,
-      };
-
-      await axios.post(`${API}/sheet-music`, sheetMusicData);
       toast.success("Sheet music uploaded successfully!");
       onSuccess();
     } catch (error) {
