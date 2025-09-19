@@ -11,6 +11,15 @@ import axios from "axios";
 import { Toaster, toast } from "react-hot-toast";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+} from "firebase/auth";
+import { doc, setDoc, getDoc, updateDoc } from "firebase/firestore";
+import { auth, db } from "./firebase";
 import "./App.css";
 
 // Shadcn UI Components
@@ -117,72 +126,139 @@ const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (token) {
-      axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
-      fetchCurrentUser();
-    } else {
+    // Listen for authentication state changes
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // User is signed in, fetch additional profile data from Firestore
+        try {
+          const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            setUser({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              full_name: userData.full_name || firebaseUser.displayName || "",
+              role: userData.role || "student",
+              avatar_url: userData.avatar_url || firebaseUser.photoURL || "",
+              created_at:
+                userData.created_at || firebaseUser.metadata.creationTime,
+            });
+          } else {
+            // Create basic user profile if it doesn't exist
+            const userData = {
+              full_name: firebaseUser.displayName || "",
+              role: "student",
+              avatar_url: firebaseUser.photoURL || "",
+              created_at: new Date().toISOString(),
+            };
+            await setDoc(doc(db, "users", firebaseUser.uid), userData);
+            setUser({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              ...userData,
+            });
+          }
+        } catch (error) {
+          console.error("Error fetching user data:", error);
+          setUser({
+            uid: firebaseUser.uid,
+            email: firebaseUser.email,
+            full_name: firebaseUser.displayName || "",
+            role: "student",
+            avatar_url: firebaseUser.photoURL || "",
+            created_at: firebaseUser.metadata.creationTime,
+          });
+        }
+      } else {
+        setUser(null);
+      }
       setLoading(false);
-    }
-  }, []);
+    });
 
-  const fetchCurrentUser = async () => {
-    try {
-      const response = await axios.get(`${API}/auth/me`);
-      setUser(response.data);
-    } catch (error) {
-      localStorage.removeItem("token");
-      delete axios.defaults.headers.common["Authorization"];
-    } finally {
-      setLoading(false);
-    }
-  };
+    return () => unsubscribe();
+  }, []);
 
   const login = async (email, password) => {
     try {
-      const response = await axios.post(`${API}/auth/login`, {
-        email,
-        password,
-      });
-      const { access_token, user: userData } = response.data;
-
-      localStorage.setItem("token", access_token);
-      axios.defaults.headers.common["Authorization"] = `Bearer ${access_token}`;
-      setUser(userData);
+      await signInWithEmailAndPassword(auth, email, password);
       toast.success("Welcome back!");
       return true;
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Login failed");
+      let errorMessage = "Login failed";
+      switch (error.code) {
+        case "auth/user-not-found":
+          errorMessage = "No account found with this email";
+          break;
+        case "auth/wrong-password":
+          errorMessage = "Incorrect password";
+          break;
+        case "auth/invalid-email":
+          errorMessage = "Invalid email address";
+          break;
+        case "auth/user-disabled":
+          errorMessage = "This account has been disabled";
+          break;
+        default:
+          errorMessage = error.message;
+      }
+      toast.error(errorMessage);
       return false;
     }
   };
 
   const register = async (email, password, fullName, role) => {
     try {
-      const response = await axios.post(`${API}/auth/register`, {
+      const userCredential = await createUserWithEmailAndPassword(
+        auth,
         email,
-        password,
-        full_name: fullName,
-        role,
-      });
-      const { access_token, user: userData } = response.data;
+        password
+      );
+      const firebaseUser = userCredential.user;
 
-      localStorage.setItem("token", access_token);
-      axios.defaults.headers.common["Authorization"] = `Bearer ${access_token}`;
-      setUser(userData);
+      // Update Firebase Auth profile
+      await updateProfile(firebaseUser, {
+        displayName: fullName,
+      });
+
+      // Save additional profile data to Firestore
+      const userData = {
+        full_name: fullName,
+        role: role || "student",
+        avatar_url: "",
+        created_at: new Date().toISOString(),
+      };
+
+      await setDoc(doc(db, "users", firebaseUser.uid), userData);
+
       toast.success("Welcome to ABC Music Library!");
       return true;
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Registration failed");
+      let errorMessage = "Registration failed";
+      switch (error.code) {
+        case "auth/email-already-in-use":
+          errorMessage = "An account with this email already exists";
+          break;
+        case "auth/weak-password":
+          errorMessage = "Password should be at least 6 characters";
+          break;
+        case "auth/invalid-email":
+          errorMessage = "Invalid email address";
+          break;
+        default:
+          errorMessage = error.message;
+      }
+      toast.error(errorMessage);
       return false;
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem("token");
-    delete axios.defaults.headers.common["Authorization"];
-    setUser(null);
-    toast.success("Logged out successfully");
+  const logout = async () => {
+    try {
+      await signOut(auth);
+      toast.success("Logged out successfully");
+    } catch (error) {
+      toast.error("Error signing out");
+    }
   };
 
   return (
@@ -1254,12 +1330,35 @@ const Profile = () => {
   });
   const [loading, setLoading] = useState(false);
 
+  // Update form data when user changes
+  useEffect(() => {
+    if (user) {
+      setFormData({
+        full_name: user.full_name || "",
+        avatar_url: user.avatar_url || "",
+      });
+    }
+  }, [user]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      await axios.put(`${API}/users/profile`, formData);
+      // Update Firestore document
+      await updateDoc(doc(db, "users", user.uid), {
+        full_name: formData.full_name,
+        avatar_url: formData.avatar_url,
+      });
+
+      // Update Firebase Auth profile if display name changed
+      if (formData.full_name !== user.full_name) {
+        await updateProfile(auth.currentUser, {
+          displayName: formData.full_name,
+          photoURL: formData.avatar_url,
+        });
+      }
+
       toast.success("Profile updated successfully!");
     } catch (error) {
       toast.error("Failed to update profile");
